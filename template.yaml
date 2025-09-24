@@ -102,8 +102,46 @@ Resources:
       UserPoolId: !Ref UserPool
       GenerateSecret: false
       ExplicitAuthFlows:
-        - ADMIN_NO_SRP_AUTH
-        - USER_PASSWORD_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      CallbackURLs:
+        - http://localhost:3000/callback
+      LogoutURLs:
+        - http://localhost:3000/
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+
+  # User Pool Domain
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${AWS::StackName}-auth-domain
+      UserPoolId: !Ref UserPool
+
+  # Api Gateway with Cognito Authorizer
+  ServerlessRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
 
   # PostConfirmation Lambda -- Subscribe all users to the SNS Topic
   PostConfirmationFunction:
@@ -131,21 +169,6 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: cognito-idp.amazonaws.com
       SourceArn: !GetAtt UserPool.Arn
-
-  # Api Gateway with Cognito Authorizer
-  ServerlessRestApi:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: Prod
-      TracingEnabled: true
-      Auth:
-        DefaultAuthorizer: CognitoAuthorizer
-        AddDefaultAuthorizerToCorsPreflight: false
-        Authorizers:
-          CognitoAuthorizer:
-            Type: COGNITO_USER_POOLS
-            ProviderARNs:
-              - !GetAtt UserPool.Arn
 
 
 #  CognitoAuthorizer:
@@ -185,8 +208,6 @@ Resources:
             Path: /task
             Method: post
             RestApiId: !Ref ServerlessRestApi
-            Auth:
-              Authorizer: CognitoAuthorizer
 
   # Get Task Lambda function
   GetTaskFunction:
@@ -211,8 +232,6 @@ Resources:
             Path: /task/{task_id}
             Method: get
             RestApiId: !Ref ServerlessRestApi
-            Auth:
-              Authorizer: CognitoAuthorizer
 
   # List Task lambda function
   ListTaskFunction:
@@ -240,8 +259,6 @@ Resources:
             Path: /tasks
             Method: get
             RestApiId: !Ref ServerlessRestApi
-            Auth:
-              Authorizer: CognitoAuthorizer
 
   # Update Task Lambda function
   UpdateTaskFunction:
@@ -272,8 +289,6 @@ Resources:
             Path: /update/{task_id}
             Method: put
             RestApiId: !Ref ServerlessRestApi
-            Auth:
-              Authorizer: CognitoAuthorizer
 
 
   # Delete Task Function
@@ -299,8 +314,22 @@ Resources:
             Path: /delete/{task_id}
             Method: delete
             RestApiId: !Ref ServerlessRestApi
-            Auth:
-              Authorizer: CognitoAuthorizer
+
+  # Hello World Function (also secured)
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/hello_world/
+      Handler: app.lambda_handler
+      Architectures:
+        - x86_64
+      Events:
+        HelloWorld:
+          Type: Api
+          Properties:
+            Path: /hello
+            Method: get
+            RestApiId: !Ref ServerlessRestApi
 
   # Expiry Lambda -- consumes messages from the expiry queue sqs
   ExpiredTaskProcessorFunction:
@@ -334,7 +363,6 @@ Resources:
             FunctionResponseTypes:
               - ReportBatchItemFailures
 
-
   # Stream Processor for dynamodb streams
   StreamProcessorFunction:
     Type: AWS::Serverless::Function
@@ -359,24 +387,6 @@ Resources:
             StartingPosition: TRIM_HORIZON
             BatchSize: 10
 
-
-  HelloWorldFunction:
-    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
-    Properties:
-      CodeUri: src/hello_world/
-      Handler: app.lambda_handler
-      Architectures:
-        - x86_64
-      Events:
-        HelloWorld:
-          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
-          Properties:
-            Path: /hello
-            Method: get
-            RestApiId: !Ref ServerlessRestApi
-            Auth:
-              Authorizer: CognitoAuthorizer
-
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
     Properties:
@@ -384,6 +394,7 @@ Resources:
         Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
       ResourceQuery:
         Type: CLOUDFORMATION_STACK_1_0
+        
   ApplicationInsightsMonitoring:
     Type: AWS::ApplicationInsights::Application
     Properties:
@@ -392,10 +403,6 @@ Resources:
       AutoConfigurationEnabled: 'true'
 
 Outputs:
-  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
-  # Find out more about other implicit resources you can reference within SAM
-  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-
   ApiUrl:
     Description: API Gateway endpoint URL for Prod stage
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
@@ -405,6 +412,9 @@ Outputs:
   UserPoolClientId:
     Description: User Pool Client ID
     Value: !Ref UserPoolClient
+  UserPoolDomain:
+    Description: Cognito User Pool Domain
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
   TaskTableName:
     Description: Dynamo db Table Name
     Value: !Ref TaskTable
@@ -414,12 +424,8 @@ Outputs:
   TaskNotificationTopicArn:
     Description: SNS Topic ARN for Task Notifications
     Value: !Ref TaskNotificationTopic
-
-
-
   HelloWorldApi:
-    Description: API Gateway endpoint URL for Prod stage for Hello World
-      function
+    Description: API Gateway endpoint URL for Prod stage for Hello World function
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
   HelloWorldFunction:
     Description: Hello World Lambda Function ARN
