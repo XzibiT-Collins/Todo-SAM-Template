@@ -1,0 +1,429 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  todo-sam-app
+
+  Sample SAM Template for todo-sam-app
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Runtime: python3.10
+    Timeout: 20
+    MemorySize: 256
+
+    Tracing: Active
+    # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
+    LoggingConfig:
+      LogFormat: JSON
+
+  Api:
+    TracingEnabled: true
+
+Parameters:
+  DBTableName:
+    Type: String
+    Default: Todo-db
+
+# Resources
+Resources:
+  #########################
+  # Dynamo db table
+  TaskTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${AWS::StackName}-tasks
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+
+  # SQS FIFO Queue
+  ExpiryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-expiry-queue.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+
+  # SNS Topic for Notifications
+  TaskNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-task-notifications-topic
+
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-user-pool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireSymbols: true
+          RequireUppercase: true
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
+
+  # User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-client
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ADMIN_NO_SRP_AUTH
+        - USER_PASSWORD_AUTH
+
+  # PostConfirmation Lambda -- Subscribe all users to the SNS Topic
+  PostConfirmationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-PostConfirmation
+      CodeUri: src/post_confirmation/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref TaskNotificationTopic
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Subscribe
+              - sns:Publish
+            Resource: !Ref TaskNotificationTopic
+
+  # Permission for PostConfirmation Lambda to be invoked by Cognito
+  CognitoInvokePostConfirmationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostConfirmationFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # Api Gateway with Cognito Authorizer
+  ServerlessRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      TracingEnabled: true
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            Type: COGNITO_USER_POOLS
+            ProviderARNs:
+              - !GetAtt UserPool.Arn
+
+
+#  CognitoAuthorizer:
+#    Type: AWS::ApiGateway::Authorizer
+#    Properties:
+#      Name: CognitoAuthorizer
+#      Type: COGNITO_USER_POOLS
+#      RestApiId: !Ref ServerlessRestApi
+#      ProviderARNs:
+#        - !GetAtt UserPool.Arn
+
+  # Create Task Lambda -- Lambda to handle task creation
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-CreateTask
+      CodeUri: src/create_task/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TASK_TABLE_NAME: !Ref TaskTable
+          EXPIRY_QUEUE_URL: !Ref ExpiryQueue
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt TaskTable.Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt ExpiryQueue.Arn
+      Events:
+        CreateTaskApi:
+          Type: Api
+          Properties:
+            Path: /task
+            Method: post
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # Get Task Lambda function
+  GetTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-GetTask
+      CodeUri: src/get_task/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TASK_TABLE_NAME: !Ref TaskTable
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+            Resource: !GetAtt TaskTable.Arn
+      Events:
+        GetTaskApi:
+          Type: Api
+          Properties:
+            Path: /task/{task_id}
+            Method: get
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # List Task lambda function
+  ListTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-ListTask
+      CodeUri: src/list_tasks/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TASK_TABLE_NAME: !Ref TaskTable
+          STATUS_INDEX: StatusIndex
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+            Resource:
+              - !GetAtt TaskTable.Arn
+              - !Join [ '', [ !GetAtt TaskTable.Arn, '/index/*' ] ]
+      Events:
+        ListTasksApi:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: get
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # Update Task Lambda function
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-UpdateTask
+      CodeUri: src/update_task/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TASK_TABLE_NAME: !Ref TaskTable
+          EXPIRY_QUEUE_URL: !Ref ExpiryQueue
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt TaskTable.Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt ExpiryQueue.Arn
+      Events:
+        UpdateTaskApi:
+          Type: Api
+          Properties:
+            Path: /update/{task_id}
+            Method: put
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+
+  # Delete Task Function
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-DeleteTask
+      CodeUri: src/delete_task/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TASK_TABLE_NAME: !Ref TaskTable
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:DeleteItem
+            Resource: !GetAtt TaskTable.Arn
+      Events:
+        DeleteTaskApi:
+          Type: Api
+          Properties:
+            Path: /delete/{task_id}
+            Method: delete
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # Expiry Lambda -- consumes messages from the expiry queue sqs
+  ExpiredTaskProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-ExpiryProcessor
+      CodeUri: src/task_expiry_processor/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TASK_TABLE_NAME: !Ref TaskTable
+          SNS_TOPIC_ARN: !Ref TaskNotificationTopic
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt TaskTable.Arn
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref TaskNotificationTopic
+      Events:
+        ExpiryQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ExpiryQueue.Arn
+            BatchSize: 5
+            Enabled: true
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+
+  # Stream Processor for dynamodb streams
+  StreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-StreamProcessor
+      CodeUri: src/stream_processor
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          EXPIRY_QUEUE_URL: !Ref ExpiryQueue
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt ExpiryQueue.Arn
+      Events:
+        TaskStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt TaskTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 10
+
+
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/hello_world/
+      Handler: app.lambda_handler
+      Architectures:
+        - x86_64
+      Events:
+        HelloWorld:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /hello
+            Method: get
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Ref: ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+
+  ApiUrl:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: User Pool Client ID
+    Value: !Ref UserPoolClient
+  TaskTableName:
+    Description: Dynamo db Table Name
+    Value: !Ref TaskTable
+  ExpiryQueueUrl:
+    Description: SQS Expiry Queue URL
+    Value: !Ref ExpiryQueue
+  TaskNotificationTopicArn:
+    Description: SNS Topic ARN for Task Notifications
+    Value: !Ref TaskNotificationTopic
+
+
+
+  HelloWorldApi:
+    Description: API Gateway endpoint URL for Prod stage for Hello World
+      function
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
+  HelloWorldFunction:
+    Description: Hello World Lambda Function ARN
+    Value: !GetAtt HelloWorldFunction.Arn
+  HelloWorldFunctionIamRole:
+    Description: Implicit IAM Role created for Hello World function
+    Value: !GetAtt HelloWorldFunctionRole.Arn
