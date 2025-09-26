@@ -1,4 +1,5 @@
 import json,boto3,os,logging
+from cors_helper import build_response
 
 # import requests
 logger = logging.getLogger(__name__)
@@ -29,25 +30,12 @@ def lambda_handler(event, context):
 
     task_id = event.get('pathParameters', {}).get('taskId')
     if not task_id:
-        return {
-            "statusCode": 400,
-            "body": json.dumps({
-                "message": "Invalid request: Task ID is required"
-            })
-        }
+        return build_response(400, {"message": "Invalid request: Task ID is required"})
 
     key = {"PK": f"TASK#{task_id}", "SK": f"USER#{user_id}"}
     response = table.get_item(Key=key)
     task = response.get('Item')
     if not task:
-        return {
-            "statusCode": 404,
-            "body": json.dumps({
-                "message": "Task not found"
-            })
-        }
+        return build_response(404, {"message": "Task not found"})
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps(task)
-    }
+    return build_response(200, task)

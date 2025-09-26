@@ -11,7 +11,6 @@ Globals:
     Runtime: python3.10
     Timeout: 20
     MemorySize: 256
-
     Tracing: Active
     # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
     LoggingConfig:
@@ -127,7 +126,7 @@ Resources:
       UserPoolId: !Ref UserPool
 
   # Api Gateway with Cognito Authorizer
-  ServerlessRestApi:
+  MyApiGateway:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
@@ -142,6 +141,8 @@ Resources:
         Authorizers:
           CognitoAuthorizer:
             UserPoolArn: !GetAtt UserPool.Arn
+            Identity:
+              Header: Authorization
 
   # PostConfirmation Lambda -- Subscribe all users to the SNS Topic
   PostConfirmationFunction:
@@ -171,14 +172,16 @@ Resources:
       SourceArn: !GetAtt UserPool.Arn
 
 
-#  CognitoAuthorizer:
-#    Type: AWS::ApiGateway::Authorizer
-#    Properties:
-#      Name: CognitoAuthorizer
-#      Type: COGNITO_USER_POOLS
-#      RestApiId: !Ref ServerlessRestApi
-#      ProviderARNs:
-#        - !GetAtt UserPool.Arn
+ # Utils Layer
+  UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub ${AWS::StackName}-UtilsLayer
+      Description: Utility functions for the Task application
+      ContentUri: src/utils/
+      CompatibleRuntimes:
+        - python3.10
+        - python3.11
 
   # Create Task Lambda -- Lambda to handle task creation
   CreateTaskFunction:
@@ -187,6 +190,8 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-CreateTask
       CodeUri: src/create_task/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref UtilsLayer
       Environment:
         Variables:
           TASK_TABLE_NAME: !Ref TaskTable
@@ -207,7 +212,9 @@ Resources:
           Properties:
             Path: /task
             Method: post
-            RestApiId: !Ref ServerlessRestApi
+            RestApiId: !Ref MyApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   # Get Task Lambda function
   GetTaskFunction:
@@ -216,6 +223,8 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-GetTask
       CodeUri: src/get_task/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref UtilsLayer
       Environment:
         Variables:
           TASK_TABLE_NAME: !Ref TaskTable
@@ -231,7 +240,9 @@ Resources:
           Properties:
             Path: /task/{task_id}
             Method: get
-            RestApiId: !Ref ServerlessRestApi
+            RestApiId: !Ref MyApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   # List Task lambda function
   ListTaskFunction:
@@ -240,6 +251,8 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-ListTask
       CodeUri: src/list_tasks/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref UtilsLayer
       Environment:
         Variables:
           TASK_TABLE_NAME: !Ref TaskTable
@@ -258,7 +271,9 @@ Resources:
           Properties:
             Path: /tasks
             Method: get
-            RestApiId: !Ref ServerlessRestApi
+            RestApiId: !Ref MyApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   # Update Task Lambda function
   UpdateTaskFunction:
@@ -267,6 +282,8 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-UpdateTask
       CodeUri: src/update_task/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref UtilsLayer
       Environment:
         Variables:
           TASK_TABLE_NAME: !Ref TaskTable
@@ -288,7 +305,9 @@ Resources:
           Properties:
             Path: /update/{task_id}
             Method: put
-            RestApiId: !Ref ServerlessRestApi
+            RestApiId: !Ref MyApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
 
 
   # Delete Task Function
@@ -298,6 +317,8 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-DeleteTask
       CodeUri: src/delete_task/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref UtilsLayer
       Environment:
         Variables:
           TASK_TABLE_NAME: !Ref TaskTable
@@ -313,7 +334,9 @@ Resources:
           Properties:
             Path: /delete/{task_id}
             Method: delete
-            RestApiId: !Ref ServerlessRestApi
+            RestApiId: !Ref MyApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   # Hello World Function (also secured)
   HelloWorldFunction:
@@ -321,6 +344,8 @@ Resources:
     Properties:
       CodeUri: src/hello_world/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref UtilsLayer
       Architectures:
         - x86_64
       Events:
@@ -329,7 +354,9 @@ Resources:
           Properties:
             Path: /hello
             Method: get
-            RestApiId: !Ref ServerlessRestApi
+            RestApiId: !Ref MyApiGateway
+            Auth:
+              Authorizer: NONE
 
   # Expiry Lambda -- consumes messages from the expiry queue sqs
   ExpiredTaskProcessorFunction:
@@ -405,7 +432,22 @@ Resources:
 Outputs:
   ApiUrl:
     Description: API Gateway endpoint URL for Prod stage
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  GetTaskUrl:
+    Description: Endpont url to get a specific Task with ID
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/task/{task_id}"
+  ListTasksUrl:
+    Description: Endpoint url to list all tasks, optionally filtered by status
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/tasks"
+  CreateTaskUrl:
+    Description: Endpoint url to create a new Task
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/task"
+  UpdateTaskUrl:
+    Description: Endpoint url to update a Task with ID
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/update/{task_id}"
+  DeleteTaskUrl:
+    Description: Endpoint url to delete a Task with ID
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/delete/{task_id}"
   UserPoolId:
     Description: Cognito User Pool ID
     Value: !Ref UserPool
@@ -426,7 +468,7 @@ Outputs:
     Value: !Ref TaskNotificationTopic
   HelloWorldApi:
     Description: API Gateway endpoint URL for Prod stage for Hello World function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
   HelloWorldFunction:
     Description: Hello World Lambda Function ARN
     Value: !GetAtt HelloWorldFunction.Arn

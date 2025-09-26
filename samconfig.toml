@@ -16,8 +16,8 @@ lint = true
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
-stack_name = "sam-project-stack-2"
-s3_prefix = "sam-project-stack-2"
+stack_name = "sam-project-stack"
+s3_prefix = "sam-project-stack"
 region = "eu-central-1"
 disable_rollback = true
 parameter_overrides = "DBTableName=\"Todo-db\""
