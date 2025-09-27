@@ -67,6 +67,7 @@ Resources:
       QueueName: !Sub ${AWS::StackName}-expiry-queue.fifo
       FifoQueue: true
       ContentBasedDeduplication: true
+      DelaySeconds: 300     # delay message processing for 5 minutes
 
 
   # SNS Topic for Notifications

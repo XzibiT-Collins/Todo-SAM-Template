@@ -24,7 +24,7 @@ def lambda_handler(event, context):
         task_id = body.get("taskId")
         user_id = body.get("userId")
 
-        deadline = datetime(body.get("deadline", 0))
+        deadline = datetime.fromtimestamp(body.get("deadline", 0))
         if not task_id or not user_id:
             continue
 

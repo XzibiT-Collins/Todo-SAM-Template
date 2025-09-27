@@ -1,5 +1,5 @@
-import os, json, time, boto3, logging
-import uuid
+import os, json, boto3, logging
+from datetime import datetime
 
 from boto3.dynamodb.conditions import Attr
 from cors_helper import build_response
@@ -38,7 +38,7 @@ def lambda_handler(event, context):
     updates = {}
     if "description" in body: updates["Description"] = body["description"]
     if "status" in body: updates["Status"] = body["status"]
-    if "deadline" in body: updates["Deadline"] = int(body["deadline"])
+    if "deadline" in body: updates["Deadline"] = datetime.fromtimestamp(body["deadline"])
 
     if not updates:
         return build_response(400, {"message":"Nothing to update"})
@@ -73,20 +73,20 @@ def lambda_handler(event, context):
     except Exception as e:
         return build_response(400, {"message":"Update failed","error":str(e)})
 
-    # If deadline changed and new deadline in future -> send new scheduled message (note SQS DelaySeconds max 900)
-    if "Deadline" in updates:
-        deadline = int(updates["Deadline"])
-        now = int(time.time())
-        delay = deadline - now
-        if delay < 0:
-            delay = 0
-        if delay > 900:
-            delay = 900
-
-        sqs.send_message(
-            QueueUrl=QUEUE_URL,
-            MessageBody=json.dumps({"taskId": task_id, "userId": user_id, "deadline": deadline}),
-            MessageGroupId=task_id,
-            MessageDeduplicationId=str(uuid.uuid4())
-        )
+    # # If deadline changed and new deadline in future -> send new scheduled message (note SQS DelaySeconds max 900)
+    # if "Deadline" in updates:
+    #     deadline = int(updates["Deadline"])
+    #     now = int(time.time())
+    #     delay = deadline - now
+    #     if delay < 0:
+    #         delay = 0
+    #     if delay > 900:
+    #         delay = 900
+    #
+    #     sqs.send_message(
+    #         QueueUrl=QUEUE_URL,
+    #         MessageBody=json.dumps({"taskId": task_id, "userId": user_id, "deadline": deadline}),
+    #         MessageGroupId=task_id,
+    #         MessageDeduplicationId=str(uuid.uuid4())
+    #     )
     return build_response(200, {"message":"updated"})
